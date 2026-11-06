@@ -51,11 +51,11 @@ def validate_inputs(bundles):
                         for p in (root / "include").rglob("*.h")})
     if plans[0] != plans[1]:
         raise RuntimeError("cannot merge macOS bundles from different source locks")
-    if libraries[0] != libraries[1]:
-        raise RuntimeError("macOS dependency closures differ; align dependency versions before merging")
     if not headers[0] or headers[0] != headers[1]:
         raise RuntimeError("macOS C SDK headers differ")
-    return plans[0], sorted(libraries[0])
+    # A dependency may legitimately be needed on just one architecture, e.g.
+    # arm64 FreeType with Brotli versus x86_64 FreeType without it.
+    return plans[0], sorted(set.union(*libraries))
 
 
 def zip_tree(source, archive):
@@ -72,6 +72,24 @@ def zip_tree(source, archive):
                 stream.write(path, name)
 
 
+def validate_dependency_architectures(directory, library_architectures):
+    for name, architectures in library_architectures.items():
+        for architecture in architectures:
+            output = run("otool", "-arch", architecture, "-L", str(directory / name))
+            for line in output.splitlines()[1:]:
+                dependency = line.strip().split(" (", 1)[0]
+                if dependency.startswith(("/usr/lib/", "/System/")):
+                    continue
+                if dependency.startswith("@loader_path/"):
+                    target = dependency[len("@loader_path/"):]
+                elif dependency == "@rpath/" + name:
+                    continue  # The primary library's install ID, not a dependency.
+                else:
+                    raise RuntimeError(f"non-relocatable dependency: {name} ({architecture}): {dependency}")
+                if "/" in target or architecture not in library_architectures.get(target, []):
+                    raise RuntimeError(f"missing dependency architecture: {name} ({architecture}) needs {dependency}")
+
+
 def merge_bundles(bundles, work):
     lock, libraries = validate_inputs(bundles)
     dest = work / "universal/mpv"
@@ -83,15 +101,31 @@ def merge_bundles(bundles, work):
         shutil.copy2(first / filename, dest / filename)
     for name, root in bundles.items():
         shutil.copytree(root / "licenses", dest / "licenses" / name)
+    library_architectures = {}
     for filename in libraries:
-        checked("lipo", "-create", *(str(root / filename) for root in bundles.values()), "-output", str(dest / filename))
+        inputs = [(name, root / filename) for name, root in bundles.items() if (root / filename).is_file()]
+        expected = {ARCHITECTURES[name] for name, _ in inputs}
+        for name, path in inputs:
+            actual = set(run("lipo", "-archs", str(path)).split())
+            if actual != {ARCHITECTURES[name]}:
+                raise RuntimeError(f"unexpected input architectures in {name}/{filename}: {actual}")
+        if len(inputs) == 2:
+            checked("lipo", "-create", *(str(path) for _, path in inputs), "-output", str(dest / filename))
+        else:
+            print(f"Architecture-specific dependency: {filename} ({', '.join(sorted(expected))})", flush=True)
+            shutil.copy2(inputs[0][1], dest / filename)
         architectures = set(run("lipo", "-archs", str(dest / filename)).split())
-        if architectures != {"arm64", "x86_64"}:
-            raise RuntimeError(f"invalid universal architectures in {filename}: {architectures}")
+        if architectures != expected:
+            raise RuntimeError(f"invalid merged architectures in {filename}: expected {expected}, got {architectures}")
+        if filename == "libmpv.dylib" and architectures != {"arm64", "x86_64"}:
+            raise RuntimeError("the primary libmpv library must be universal")
+        library_architectures[filename] = sorted(architectures)
         checked("codesign", "--force", "--sign", "-", str(dest / filename))
+    validate_dependency_architectures(dest, library_architectures)
     metadata = {"platform": "darwin/universal", "license_profile": "lgpl", "mpv_version": lock["mpv"]["version"],
                 "architectures": ["arm64", "x86_64"], "macos_minimum": lock["macos_minimum"],
                 "libraries": {name: sha256(dest / name) for name in libraries},
+                "library_architectures": library_architectures,
                 "inputs": {name: json.loads((root / "manifest.json").read_text(encoding="utf-8")) for name, root in bundles.items()}}
     write_json(dest / "manifest.json", metadata)
     return dest

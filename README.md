@@ -23,7 +23,7 @@
 
 主库和依赖必须保留在同一目录。Linux 使用 `$ORIGIN` RPATH；macOS 主库使用 `@rpath` install ID，同目录依赖使用 `@loader_path`。
 
-XCFramework 内的 `mpv.framework` 包含 universal 主库、头文件，以及嵌套在 `Frameworks/` 中的 universal 动态依赖。两个架构的源码锁、头文件和依赖集合不一致时拒绝合并。构建会验证合并后的架构、音频行为，以及真实 C 程序对 XCFramework 的编译 / 链接 / 运行。签名是 ad-hoc，不是 Developer ID 签名，也未经公证。
+XCFramework 内的 `mpv.framework` 包含 universal 主库、头文件和嵌套在 `Frameworks/` 中的动态依赖。同名的双架构库合并为 universal；仅某一架构需要的辅助库保留该架构的版本，并记录在 `library_architectures` 中。源码锁或头文件不一致时拒绝合并；逐架构检查所有动态依赖是否具有所需的架构，不能省略必需的库。构建还会验证音频行为，以及真实 C 程序对 XCFramework 的编译 / 链接 / 运行。签名是 ad-hoc，不是 Developer ID 签名，也未经公证。
 
 ## 自动更新与发布门槛
 
