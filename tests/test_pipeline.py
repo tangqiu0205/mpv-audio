@@ -23,7 +23,7 @@ def passing_report(version="0.42.0"):
     return {"schema": 2, "mpv_version": "mpv v" + version, "expected_mpv_version": version,
             "formats": list(fixtures.REQUIRED_FORMATS), "wav_decode": True,
             "spectrum_filter": True, "spectrum_metadata": True, "pcm_sampling": True,
-            "hls_http": True, "pause_volume": True}
+            "hls_http": True, "https_local": True, "pause_volume": True}
 
 
 class BuildProfileTests(unittest.TestCase):
@@ -92,20 +92,25 @@ class StandaloneRegressionTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/native-release.yml").read_text(encoding="utf-8")
         build_job = workflow.split("  build:\n", 1)[1].split("\n  publish:", 1)[0]
         self.assertNotIn("repository:", build_job)
-        self.assertIn("scripts/fixtures.py", build_job)
+        self.assertIn("scripts/fixtures.py", workflow)
+        self.assertIn("name: regression-fixtures", build_job)
+        self.assertNotIn("scripts/fixtures.py", build_job)
         self.assertIn("scripts/smoke.py", build_job)
+        self.assertIn("scripts/sdk.py", build_job)
 
     def test_synthetic_fixture_generator_covers_every_format(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "fixtures"
             with patch.object(fixtures, "checked") as checked, patch.object(fixtures, "run", return_value="ffmpeg version test"):
                 fixtures.generate(output)
-            self.assertEqual(checked.call_count, len(fixtures.FORMATS) + 1)
+            ffmpeg_calls = [call for call in checked.call_args_list if call.args[0] == "ffmpeg"]
+            self.assertEqual(len(ffmpeg_calls), len(fixtures.FORMATS) + 1)
             self.assertTrue((output / "tone.wav").exists())
-            for call in checked.call_args_list:
-                self.assertEqual(call.args[0], "ffmpeg")
+            for call in ffmpeg_calls:
                 self.assertIn("-vn", call.args)
-            self.assertIn("-hls_segment_filename", checked.call_args_list[-1].args)
+            self.assertIn("-hls_segment_filename", ffmpeg_calls[-1].args)
+            self.assertEqual(checked.call_args_list[-1].args[0], "openssl")
+            self.assertIn("-keyout", checked.call_args_list[-1].args)
 
     def test_spectrum_requires_real_values_for_all_24_bands(self):
         metadata = {f"lavfi.astats.{channel}.RMS_level": "-20" for channel in range(3, 27)}
@@ -124,7 +129,7 @@ class StandaloneRegressionTests(unittest.TestCase):
 
     def test_publication_requires_hls_every_codec_and_matching_version(self):
         smoke.validate_report(passing_report(), "0.42.0")
-        for change in ({"hls_http": False}, {"formats": ["wav"]}, {"spectrum_metadata": False},
+        for change in ({"hls_http": False}, {"https_local": False}, {"formats": ["wav"]}, {"spectrum_metadata": False},
                        {"expected_mpv_version": "0.38.0"}, {"schema": 1}):
             with self.assertRaisesRegex(RuntimeError, "incomplete native regression"):
                 smoke.validate_report(passing_report() | change, "0.42.0")
@@ -217,15 +222,24 @@ class PackageTests(unittest.TestCase):
             write_json(root / "native-lock.json", lock)
             for platform in package.PLATFORMS:
                 with zipfile.ZipFile(root / f"mpv-audio-{platform}.zip", "w") as archive:
-                    archive.writestr("mpv/manifest.json", json.dumps({"platform": platform.replace("-", "/", 1)}))
+                    archive.writestr("mpv/manifest.json", json.dumps({"platform": platform.replace("-", "/", 1), "license_profile": "lgpl"}))
+                    archive.writestr("mpv/sdk-report.json", json.dumps({"c_compile_link_run": True}))
+                    archive.writestr("mpv/include/mpv/client.h", "/* header */")
+                    archive.writestr("mpv/lib/pkgconfig/mpv.pc", "Name: mpv-audio")
+                    archive.writestr("mpv/" + package.LIBRARY_NAMES[platform.split("-")[0]], b"library")
                     archive.writestr("mpv/native-lock.json", json.dumps(lock))
                     archive.writestr("mpv/smoke-report.json", json.dumps(passing_report()))
                 (root / f"sources-{platform}.tar.gz").write_bytes(b"source")
+            with zipfile.ZipFile(root / "libmpv_macos.xcframework.zip", "w") as archive:
+                archive.writestr("apple-sdk.json", json.dumps({"framework_compile_link_run": True,
+                                 "architectures": ["arm64", "x86_64"], "expected_mpv_version": "0.42.0", "license_profile": "lgpl"}))
+                archive.writestr("native-lock.json", json.dumps(lock))
+                archive.writestr("libmpv_macos.xcframework/Info.plist", b"plist")
             package.release_manifest(root, root / "native-lock.json")
             metadata = json.loads((root / "release.json").read_text(encoding="utf-8"))
-            self.assertEqual(len(metadata["assets"]), 6)
+            self.assertEqual(len(metadata["assets"]), 7)
             checksums = (root / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
-            self.assertEqual(len(checksums), 14)
+            self.assertEqual(len(checksums), 15)
             self.assertTrue(all(len(line.split()[0]) == 64 for line in checksums))
 
 

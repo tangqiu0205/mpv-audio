@@ -173,7 +173,8 @@ def bundle_libraries(library, dest, prefix, goos, minimum, env):
                 raise RuntimeError(f"missing deployment target in {real}")
             if any(version_tuple(v) > version_tuple(minimum) for v in versions):
                 raise RuntimeError(f"{real} requires macOS {versions}, configured minimum is {minimum}")
-            checked("install_name_tool", "-id", "@loader_path/" + name, str(target), env=env)
+            install_id = ("@rpath/" if name == LIBRARY_NAMES["darwin"] else "@loader_path/") + name
+            checked("install_name_tool", "-id", install_id, str(target), env=env)
             for old, actual in dependencies:
                 checked("install_name_tool", "-change", old, "@loader_path/" + actual.name, str(target), env=env)
         else:

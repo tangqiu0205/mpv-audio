@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import zipfile
 
-from common import ROOT, read_lock, sha256, write_json
+from common import ROOT, LIBRARY_NAMES, read_lock, sha256, write_json
 from smoke import validate_report
 
 PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64", "windows-arm64")
@@ -20,6 +20,11 @@ def package(target):
     manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
     if manifest["platform"] != target:
         raise RuntimeError("bundle platform mismatch")
+    if manifest.get("license_profile") != "lgpl":
+        raise RuntimeError("bundle must use the LGPL build profile")
+    sdk = json.loads((bundle / "sdk-report.json").read_text(encoding="utf-8"))
+    if sdk.get("c_compile_link_run") is not True:
+        raise RuntimeError("C SDK compile/link/runtime test is missing")
     output = ROOT / "dist"
     output.mkdir(exist_ok=True)
     archive = output / f"mpv-audio-{platform}.zip"
@@ -41,12 +46,32 @@ def release_manifest(directory, lock_path):
             manifest = json.loads(stream.read("mpv/manifest.json"))
             plan = json.loads(stream.read("mpv/native-lock.json"))
             smoke = json.loads(stream.read("mpv/smoke-report.json"))
+            sdk = json.loads(stream.read("mpv/sdk-report.json"))
+            for required in ("mpv/include/mpv/client.h", "mpv/lib/pkgconfig/mpv.pc",
+                             "mpv/" + LIBRARY_NAMES[platform.split("-")[0]]):
+                if required not in stream.namelist():
+                    raise RuntimeError(f"missing SDK file in {platform}: {required}")
         if manifest["platform"].replace("/", "-") != platform or plan != lock:
             raise RuntimeError(f"inconsistent build plan in {platform}")
         validate_report(smoke, lock["mpv"]["version"])
+        if manifest.get("license_profile") != "lgpl" or sdk.get("c_compile_link_run") is not True:
+            raise RuntimeError(f"LGPL profile or C SDK test is missing in {platform}")
         assets[platform] = {"asset": archive.name, "sha256": sha256(archive)}
+    apple_archive = directory / "libmpv_macos.xcframework.zip"
+    with zipfile.ZipFile(apple_archive) as stream:
+        apple = json.loads(stream.read("apple-sdk.json"))
+        apple_lock = json.loads(stream.read("native-lock.json"))
+        if "libmpv_macos.xcframework/Info.plist" not in stream.namelist():
+            raise RuntimeError("XCFramework metadata is missing")
+    if (apple_lock != lock or apple.get("framework_compile_link_run") is not True
+            or set(apple.get("architectures", [])) != {"arm64", "x86_64"}
+            or apple.get("expected_mpv_version") != lock["mpv"]["version"]
+            or apple.get("license_profile") != "lgpl"):
+        raise RuntimeError("universal XCFramework validation is incomplete")
+    assets["darwin-universal"] = {"asset": apple_archive.name, "sha256": sha256(apple_archive)}
     write_json(directory / "release.json", {"schema": 1, "tag": lock["release"]["tag"],
-               "mpv_version": lock["mpv"]["version"], "profile": "audio", "assets": assets})
+               "mpv_version": lock["mpv"]["version"], "profile": "audio", "license_profile": "lgpl",
+               "channel": "candidate", "assets": assets})
     files = sorted(p for p in directory.iterdir() if p.is_file() and p.name != "SHA256SUMS")
     (directory / "SHA256SUMS").write_text("".join(f"{sha256(p)}  {p.name}\n" for p in files), encoding="utf-8")
 

@@ -7,8 +7,9 @@ import re
 import shutil
 import tarfile
 
-from common import ROOT, LIBRARY_NAMES, checked, host_platform, read_lock, run, write_json
+from common import ROOT, LIBRARY_NAMES, checked, host_platform, read_lock, run, windows_environment, write_json
 from bundle import bundle_libraries
+from sdk import stage_sdk
 
 DECODERS = (
     "aac", "aac_fixed", "aac_latm", "mp3", "mp3float", "mp3adu", "mp3adufloat",
@@ -44,6 +45,7 @@ def ffmpeg_options(goos, arch, prefix):
     options = [
         f"--prefix={prefix}", "--disable-autodetect", "--disable-everything",
         "--disable-programs", "--disable-doc", "--disable-debug", "--disable-static",
+        "--disable-gpl", "--disable-nonfree",
         "--enable-shared", "--enable-pic", "--disable-asm", "--disable-avdevice",
         "--enable-avcodec", "--enable-avformat", "--enable-avfilter",
         "--enable-swresample", "--enable-swscale", "--enable-network",
@@ -62,7 +64,7 @@ def ffmpeg_options(goos, arch, prefix):
 
 
 def mpv_options(goos):
-    options = ["-Dlibmpv=true", "-Dcplayer=false", "-Dbuild-date=false",
+    options = ["-Dlibmpv=true", "-Dcplayer=false", "-Dbuild-date=false", "-Dgpl=false",
                "-Dgl=disabled", "-Dlua=disabled", "-Dvector=enabled"]
     options += {"linux": ["-Dalsa=enabled", "-Dpulse=enabled"],
                 "darwin": ["-Dcoreaudio=enabled"],
@@ -76,6 +78,10 @@ def verify_ffmpeg_profile(source):
     expected = {name.upper() for name in DECODERS}
     if not enabled or enabled - expected:
         raise RuntimeError(f"unexpected FFmpeg decoder configuration: {sorted(enabled - expected)}")
+    license_config = (source / "config.h").read_text(encoding="utf-8")
+    for name in ("GPL", "NONFREE"):
+        if not re.search(rf"^#define CONFIG_{name} 0$", license_config, re.MULTILINE):
+            raise RuntimeError(f"FFmpeg LGPL profile requires CONFIG_{name}=0")
     for name in ("AAC", "MP3FLOAT", "FLAC", "VORBIS", "OPUS", "PCM_S16LE"):
         if name not in enabled:
             raise RuntimeError(f"required decoder is missing: {name}")
@@ -116,6 +122,8 @@ def build(target, lock_path):
     env = os.environ.copy()
     env["PKG_CONFIG_PATH"] = str(prefix / "lib/pkgconfig") + os.pathsep + env.get("PKG_CONFIG_PATH", "")
     env["PATH"] = str(prefix / "bin") + os.pathsep + env["PATH"]
+    if goos == "windows":
+        env = windows_environment(env)
     if goos == "darwin":
         env["MACOSX_DEPLOYMENT_TARGET"] = lock["macos_minimum"]
         brew = Path(run("brew", "--prefix"))
@@ -154,6 +162,10 @@ def build(target, lock_path):
     dest = work / "bundle" / "mpv"
     dest.mkdir(parents=True)
     metadata = bundle_libraries(library, dest, prefix, goos, lock["macos_minimum"], env)
+    stage_sdk(prefix, dest, goos, arch, env)
+    mpv_config = (work / "mpv-build/config.h").read_text(encoding="utf-8")
+    if not re.search(r"^#define HAVE_GPL 0$", mpv_config, re.MULTILINE):
+        raise RuntimeError("mpv LGPL profile requires HAVE_GPL=0")
     notices = dest / "licenses"
     for name in ("mpv", "ffmpeg", "libplacebo", "libass"):
         source = work / name
@@ -166,9 +178,11 @@ def build(target, lock_path):
                 found = True
         if not found:
             raise RuntimeError(f"no license notices collected for {name}")
+    shutil.copy2(work / "mpv-build/config.h", notices / "mpv/config.h")
     shutil.copy2(work / "ffmpeg/config.h", notices / "ffmpeg/config.h")
     shutil.copy2(work / "ffmpeg/config_components.h", notices / "ffmpeg/config_components.h")
     metadata.update(platform=target, mpv_version=lock["mpv"]["version"], profile="audio",
+                    license_profile="lgpl", supporting_licenses_review_required=True,
                     sources={name: lock[name] for name in ("mpv", "ffmpeg", "libplacebo", "libass")},
                     options={"ffmpeg": ff_options, "mpv": mp_options},
                     macos_minimum=lock["macos_minimum"] if goos == "darwin" else None)

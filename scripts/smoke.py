@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+import ssl
 import tempfile
 from threading import Thread
 import time
@@ -153,13 +154,17 @@ class Client:
 
 
 @contextmanager
-def local_hls(directory):
+def local_stream(directory, tls=False):
     handler = partial(SimpleHTTPRequestHandler, directory=str(directory))
     with ThreadingHTTPServer(("127.0.0.1", 0), handler) as server:
+        if tls:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(directory / "test-cert.pem", directory / "test-key.pem")
+            server.socket = context.wrap_socket(server.socket, server_side=True)
         worker = Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
-            yield f"http://127.0.0.1:{server.server_port}/live.m3u8"
+            yield f"{'https' if tls else 'http'}://127.0.0.1:{server.server_port}"
         finally:
             server.shutdown()
             worker.join()
@@ -193,10 +198,19 @@ def test_bundle(library, fixtures, expected_version):
             observed_formats.append(name)
         finally:
             client.close()
-    with local_hls(fixtures) as source:
+    with local_stream(fixtures) as source:
         try:
             client.open({"ao": "null", "af": spectrum_filter()})
-            client.load(source)
+            client.load(source + "/live.m3u8")
+            client.wait_end(require_spectrum=True)
+        finally:
+            client.close()
+    with local_stream(fixtures, tls=True) as source:
+        try:
+            # Test encrypted transport against a local self-signed endpoint;
+            # public CA/hostname verification is deliberately a separate concern.
+            client.open({"ao": "null", "af": spectrum_filter(), "tls-verify": "no"})
+            client.load(source + "/tone.flac")
             client.wait_end(require_spectrum=True)
         finally:
             client.close()
@@ -212,11 +226,11 @@ def test_bundle(library, fixtures, expected_version):
         validate_pcm(pcm.read_bytes())
     return {"schema": 2, "mpv_version": version, "expected_mpv_version": expected_version,
             "formats": observed_formats, "wav_decode": True, "spectrum_filter": True,
-            "spectrum_metadata": True, "pcm_sampling": True, "hls_http": True, "pause_volume": True}
+            "spectrum_metadata": True, "pcm_sampling": True, "hls_http": True, "https_local": True, "pause_volume": True}
 
 
 def validate_report(report, expected_version):
-    checks = ("wav_decode", "spectrum_filter", "spectrum_metadata", "pcm_sampling", "hls_http", "pause_volume")
+    checks = ("wav_decode", "spectrum_filter", "spectrum_metadata", "pcm_sampling", "hls_http", "https_local", "pause_volume")
     if (report.get("schema") != 2 or report.get("expected_mpv_version") != expected_version
             or not all(report.get(key) is True for key in checks)
             or set(report.get("formats", [])) != set(REQUIRED_FORMATS)):

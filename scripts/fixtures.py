@@ -34,6 +34,10 @@ def generate(directory):
     checked("ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-i", str(source),
             "-vn", "-c:a", "aac", "-f", "hls", "-hls_time", "1", "-hls_list_size", "0",
             "-hls_segment_filename", str(directory / "segment-%03d.ts"), str(directory / "live.m3u8"))
+    # Ephemeral test credentials only: never included in runtime/source releases.
+    checked("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+            "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost",
+            "-keyout", str(directory / "test-key.pem"), "-out", str(directory / "test-cert.pem"))
     write_json(directory / "fixtures.json", {"source": "synthetic two-second 997/1601 Hz stereo tone",
                "generator": run("ffmpeg", "-version").splitlines()[0], "formats": list(REQUIRED_FORMATS)})
 
