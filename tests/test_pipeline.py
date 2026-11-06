@@ -86,13 +86,14 @@ class BuildProfileTests(unittest.TestCase):
 
 
 class StandaloneRegressionTests(unittest.TestCase):
-    def test_pipeline_does_not_require_private_consumer(self):
+    def test_pipeline_uses_local_regression_tools(self):
         lock = read_lock(ROOT / "native-lock.json")
-        self.assertNotIn("consumer", lock)
+        self.assertEqual(set(lock), {"schema", "mpv", "ffmpeg", "libplacebo", "libass", "macos_minimum"})
         workflow = (ROOT / ".github/workflows/native-release.yml").read_text(encoding="utf-8")
-        self.assertNotIn("consumer_repository", workflow)
-        self.assertNotIn("path: consumer", workflow)
-        self.assertIn("scripts/fixtures.py", workflow)
+        build_job = workflow.split("  build:\n", 1)[1].split("\n  publish:", 1)[0]
+        self.assertNotIn("repository:", build_job)
+        self.assertIn("scripts/fixtures.py", build_job)
+        self.assertIn("scripts/smoke.py", build_job)
 
     def test_synthetic_fixture_generator_covers_every_format(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -117,7 +118,7 @@ class StandaloneRegressionTests(unittest.TestCase):
 
     def test_silent_or_truncated_pcm_fails(self):
         for data in (b"", b"\0" * 64000, b"\1" * 100, b"\1" * 64001):
-            with self.assertRaisesRegex(RuntimeError, "invalid recognition PCM"):
+            with self.assertRaisesRegex(RuntimeError, "invalid PCM"):
                 smoke.validate_pcm(data)
         smoke.validate_pcm(b"\1\0" * 32000)
 

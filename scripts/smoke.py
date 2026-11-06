@@ -167,7 +167,7 @@ def local_hls(directory):
 
 def validate_pcm(data):
     if len(data) < 60000 or len(data) % 2 or not any(data):
-        raise RuntimeError(f"invalid recognition PCM output: {len(data)} bytes")
+        raise RuntimeError(f"invalid PCM output: {len(data)} bytes")
 
 
 def test_bundle(library, fixtures, expected_version):
