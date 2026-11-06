@@ -4,7 +4,8 @@
     "version": "0.42.0",
     "repository": "https://github.com/mpv-player/mpv.git",
     "tag": "v0.42.0",
-    "commit": "b0841e8c4d156b8403dc1876c4cbd9011eb583f3"
+    "commit": "b0841e8c4d156b8403dc1876c4cbd9011eb583f3",
+    "patches": ["mpv-coreaudio-utils.patch"]
   },
   "ffmpeg": {
     "version": "8.0.1",

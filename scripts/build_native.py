@@ -7,7 +7,7 @@ import re
 import shutil
 import tarfile
 
-from common import ROOT, LIBRARY_NAMES, checked, host_platform, read_lock, run, windows_environment, write_json
+from common import ROOT, LIBRARY_NAMES, checked, host_platform, read_lock, run, sha256, windows_environment, write_json
 from bundle import bundle_libraries
 from sdk import stage_sdk
 
@@ -41,6 +41,22 @@ def clone_source(spec, dest, env):
     checked("git", "-C", str(dest), "submodule", "update", "--init", "--recursive", "--depth=1", env=env)
 
 
+def apply_source_patches(spec, source, env):
+    records = []
+    for name in spec.get("patches", []):
+        patch = ROOT / "patches" / name
+        checked("git", "-C", str(source), "apply", "--check", str(patch), env=env)
+        checked("git", "-C", str(source), "apply", str(patch), env=env)
+        records.append({"file": name, "sha256": sha256(patch)})
+    if records:
+        copies = source / "mpv-audio-patches"
+        copies.mkdir()
+        for record in records:
+            shutil.copy2(ROOT / "patches" / record["file"], copies / record["file"])
+        write_json(copies / "manifest.json", records)
+    return records
+
+
 def ffmpeg_options(goos, arch, prefix):
     options = [
         f"--prefix={prefix}", "--disable-autodetect", "--disable-everything",
@@ -65,7 +81,7 @@ def ffmpeg_options(goos, arch, prefix):
 
 def mpv_options(goos):
     options = ["-Dlibmpv=true", "-Dcplayer=false", "-Dbuild-date=false", "-Dgpl=false",
-               "-Dgl=disabled", "-Dlua=disabled", "-Dvector=enabled"]
+               "-Dgl=disabled", "-Dlua=disabled", "-Dvector=enabled", "-Db_lundef=true"]
     options += {"linux": ["-Dalsa=enabled", "-Dpulse=enabled"],
                 "darwin": ["-Dcoreaudio=enabled"],
                 "windows": ["-Dwasapi=enabled", "-Dwin32-threads=enabled"]}[goos]
@@ -102,7 +118,7 @@ def meson_build(name, source, work, prefix, options, env, shared=False):
 
 
 def source_archive(work, output):
-    # Ship the exact source trees, including pinned submodules and configure output.
+    # Ship patched source trees and pinned submodules; generated configs ship in the runtime bundle.
     with tarfile.open(output, "w:gz") as archive:
         for name in ("mpv", "ffmpeg", "libplacebo", "libass"):
             archive.add(work / name, arcname="sources/" + name,
@@ -131,8 +147,10 @@ def build(target, lock_path):
         env["PKG_CONFIG_PATH"] += os.pathsep + str(brew / "opt/icu4c/lib/pkgconfig")
     if goos == "linux":
         env["LD_LIBRARY_PATH"] = str(prefix / "lib")
+    patches = {}
     for name in ("mpv", "ffmpeg", "libplacebo", "libass"):
         clone_source(lock[name], work / name, env)
+        patches[name] = apply_source_patches(lock[name], work / name, env)
 
     output = ROOT / "dist"
     output.mkdir(exist_ok=True)
@@ -178,13 +196,15 @@ def build(target, lock_path):
                 found = True
         if not found:
             raise RuntimeError(f"no license notices collected for {name}")
+        if patches[name]:
+            shutil.copytree(source / "mpv-audio-patches", folder / "patches")
     shutil.copy2(work / "mpv-build/config.h", notices / "mpv/config.h")
     shutil.copy2(work / "ffmpeg/config.h", notices / "ffmpeg/config.h")
     shutil.copy2(work / "ffmpeg/config_components.h", notices / "ffmpeg/config_components.h")
     metadata.update(platform=target, mpv_version=lock["mpv"]["version"], profile="audio",
                     license_profile="lgpl", supporting_licenses_review_required=True,
                     sources={name: lock[name] for name in ("mpv", "ffmpeg", "libplacebo", "libass")},
-                    options={"ffmpeg": ff_options, "mpv": mp_options},
+                    options={"ffmpeg": ff_options, "mpv": mp_options}, patches=patches,
                     macos_minimum=lock["macos_minimum"] if goos == "darwin" else None)
     write_json(dest / "manifest.json", metadata)
     shutil.copy2(lock_path, dest / "native-lock.json")

@@ -1,0 +1,11 @@
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -880,4 +880,7 @@
+ if features['audiounit'] or features['coreaudio'] or features['avfoundation']
++    if not features['cocoa']
++        sources += files('osdep/utils-mac.c')
++    endif
+     sources += files('audio/out/ao_coreaudio_chmap.c',
+                      'audio/out/ao_coreaudio_utils.c')
+ endif

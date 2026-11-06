@@ -47,6 +47,8 @@ GitHub 定时任务仅在默认分支运行，可能延迟；长期不活跃的�
 
 基线为 mpv **0.42.0**、FFmpeg **8.0.1**、libplacebo **7.387.0**、libass **0.17.4**，源码 commit 固定在 `native-lock.json`。未来只自动跟进 mpv；如果新版本要求升级依赖，构建明确失败，由维护者审核依赖锁后重试。
 
+源码补丁记录在 `patches/` 和源码锁中，应用前执行严格检查，并将补丁及 SHA-256 一并收入源码包和许可证目录。当前补丁修正关闭 Cocoa 时 CoreAudio 遗漏 `osdep/utils-mac.c` 的上游构建依赖，不引入 GUI。libmpv 使用严格的未定义符号链接检查；补丁与未来上游不兼容时会明确停止，而不是静默忽略。
+
 保留 MP3 / MP2、AAC / HE-AAC、FLAC、Vorbis、Opus、ALAC、PCM 等音频解码，HTTP / HTTPS、HLS、MPEG-TS / MP4 等封装，以及频谱滤镜、null / PCM 输出。系统音频后端为 WASAPI、CoreAudio、ALSA / PulseAudio；TLS 使用 Schannel、Secure Transport 或 GnuTLS。
 
 关闭 FFmpeg 编码器、视频解码器、程序，以及 mpv CLI、视频输出、硬件视频解码和脚本等可选功能。mpv 仍包含强制的视频基础代码和 libass / libplacebo / swscale 依赖；这是**音频功能裁剪构建**，不是完全删除视频代码的源码分叉。
