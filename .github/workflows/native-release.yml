@@ -27,8 +27,6 @@ jobs:
     outputs:
       build: ${{ steps.plan.outputs.build }}
       tag: ${{ steps.plan.outputs.tag }}
-      consumer: ${{ steps.plan.outputs.consumer }}
-      consumer_repository: ${{ steps.plan.outputs.consumer_repository }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v6
@@ -72,14 +70,6 @@ jobs:
         with:
           name: build-plan
           path: build-plan
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ needs.plan.outputs.consumer_repository }}
-          ref: ${{ needs.plan.outputs.consumer }}
-          path: consumer
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: consumer/go.mod
       - uses: actions/setup-python@v6
         if: runner.os != 'Windows'
         with:
@@ -88,18 +78,18 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential git pkg-config ninja-build patchelf \
+          sudo apt-get install -y build-essential git pkg-config ninja-build patchelf ffmpeg \
             libfreetype-dev libfribidi-dev libharfbuzz-dev libgnutls28-dev libasound2-dev libpulse-dev
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
-        run: brew install freetype fribidi harfbuzz pkgconf ninja
+        run: brew install freetype fribidi harfbuzz pkgconf ninja ffmpeg
       - uses: msys2/setup-msys2@v2
         if: runner.os == 'Windows'
         with:
           msystem: ${{ matrix.msystem }}
           update: true
           install: git make diffutils
-          pacboy: toolchain:p python:p python-pip:p ninja:p pkgconf:p freetype:p fribidi:p harfbuzz:p
+          pacboy: toolchain:p python:p python-pip:p ninja:p pkgconf:p freetype:p fribidi:p harfbuzz:p ffmpeg:p
       - name: Build Unix audio libraries
         if: runner.os != 'Windows'
         env:
@@ -115,6 +105,13 @@ jobs:
         run: |
           python -m pip install --break-system-packages -r requirements.txt
           python scripts/build_native.py --platform "$TARGET" --lock build-plan/native-lock.json
+      - name: Generate synthetic Unix regression fixtures
+        if: runner.os != 'Windows'
+        run: python scripts/fixtures.py --output build/fixtures
+      - name: Generate synthetic Windows regression fixtures
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: python scripts/fixtures.py --output build/fixtures
       - name: Relocated Unix bundle smoke tests
         if: runner.os != 'Windows'
         env:
@@ -122,28 +119,13 @@ jobs:
         run: |
           # Do not let build-prefix search paths hide missing bundled dependencies.
           unset LD_LIBRARY_PATH DYLD_LIBRARY_PATH
-          python scripts/smoke.py --bundle "build/$NAME/bundle/mpv" --lock build-plan/native-lock.json
+          python scripts/smoke.py --bundle "build/$NAME/bundle/mpv" --fixtures build/fixtures --lock build-plan/native-lock.json
       - name: Relocated Windows bundle smoke tests
         if: runner.os == 'Windows'
         shell: msys2 {0}
         env:
           NAME: ${{ matrix.name }}
-        run: python scripts/smoke.py --bundle "build/$NAME/bundle/mpv" --lock build-plan/native-lock.json
-      - name: FM native format, HLS, spectrum and recognition regressions
-        shell: bash
-        env:
-          TARGET: ${{ matrix.platform }}
-          NAME: ${{ matrix.name }}
-        run: |
-          case "$TARGET" in
-            windows/*) lib=mpv-2.dll ;;
-            darwin/*) lib=libmpv.dylib ;;
-            linux/*) lib=libmpv.so.2 ;;
-          esac
-          export TIAOPIN_TEST_MPV=1
-          export TIAOPIN_MPV_LIBRARY="$GITHUB_WORKSPACE/build/$NAME/bundle/mpv/$lib"
-          cd consumer
-          go test ./internal/... -count=1 -timeout=5m
+        run: python scripts/smoke.py --bundle "build/$NAME/bundle/mpv" --fixtures build/fixtures --lock build-plan/native-lock.json
       - name: Package Unix artifacts
         if: runner.os != 'Windows'
         env:
@@ -200,7 +182,7 @@ jobs:
           TAG: ${{ needs.plan.outputs.tag }}
         run: |
           printf '%s\n' \
-            "Audio-focused libmpv. All six platforms passed native smoke and FM regression tests." \
+            "Audio-focused libmpv. All six platforms passed standalone format, HLS, spectrum and PCM regressions." \
             "" \
             "See native-lock.json, release.json, SHA256SUMS, per-platform sources and bundled licenses." \
             "Supporting distribution libraries are recorded in each bundle manifest; see README for compatibility and licensing limits." > release-notes.md

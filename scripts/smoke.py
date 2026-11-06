@@ -1,22 +1,40 @@
 #!/usr/bin/env python3
-"""Exercise the relocated bundle through libmpv's C API without a sound device."""
+"""Test relocated libmpv using synthetic fixtures, without a sound device or private repositories."""
 import argparse
+from contextlib import contextmanager
 import ctypes as C
-import json
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import math
 import os
 from pathlib import Path
 import re
-import struct
 import tempfile
+from threading import Thread
 import time
-import wave
 
 from common import ROOT, LIBRARY_NAMES, host_platform, read_lock, write_json
+from fixtures import FORMATS, REQUIRED_FORMATS
 
 
 class Event(C.Structure):
     _fields_ = [("id", C.c_int), ("error", C.c_int), ("userdata", C.c_uint64), ("data", C.c_void_p)]
+
+
+class Node(C.Structure):
+    pass
+
+
+class NodeList(C.Structure):
+    _fields_ = [("num", C.c_int), ("values", C.POINTER(Node)), ("keys", C.POINTER(C.c_char_p))]
+
+
+class NodeValue(C.Union):
+    _fields_ = [("string", C.c_char_p), ("list", C.POINTER(NodeList)),
+                ("integer", C.c_int64), ("number", C.c_double), ("flag", C.c_int)]
+
+
+Node._fields_ = [("value", NodeValue), ("format", C.c_int)]
 
 
 def spectrum_filter():
@@ -33,6 +51,16 @@ def spectrum_filter():
     return "@spectrum:lavfi=[" + graph + "]"
 
 
+def has_spectrum(metadata):
+    keys = [f"lavfi.astats.{channel}.RMS_level" for channel in range(3, 27)]
+    if not all(key in metadata for key in keys):
+        return False
+    levels = [float(metadata[key]) for key in keys]
+    if any(math.isnan(level) or level == math.inf for level in levels):
+        raise RuntimeError("invalid spectrum metadata")
+    return any(math.isfinite(level) and level > -60 for level in levels)
+
+
 class Client:
     def __init__(self, library):
         self.dll_dir = os.add_dll_directory(str(library.parent)) if os.name == "nt" else None
@@ -40,9 +68,12 @@ class Client:
         signatures = {
             "mpv_create": (C.c_void_p, []),
             "mpv_set_option_string": (C.c_int, [C.c_void_p, C.c_char_p, C.c_char_p]),
+            "mpv_set_property_string": (C.c_int, [C.c_void_p, C.c_char_p, C.c_char_p]),
             "mpv_initialize": (C.c_int, [C.c_void_p]),
             "mpv_command": (C.c_int, [C.c_void_p, C.POINTER(C.c_char_p)]),
             "mpv_get_property_string": (C.c_void_p, [C.c_void_p, C.c_char_p]),
+            "mpv_get_property": (C.c_int, [C.c_void_p, C.c_char_p, C.c_int, C.POINTER(Node)]),
+            "mpv_free_node_contents": (None, [C.POINTER(Node)]),
             "mpv_free": (None, [C.c_void_p]),
             "mpv_wait_event": (C.POINTER(Event), [C.c_void_p, C.c_double]),
             "mpv_terminate_destroy": (None, [C.c_void_p]),
@@ -66,6 +97,9 @@ class Client:
             self.check(self.api.mpv_set_option_string(self.handle, name.encode(), value.encode()))
         self.check(self.api.mpv_initialize(self.handle))
 
+    def set(self, name, value):
+        self.check(self.api.mpv_set_property_string(self.handle, name.encode(), value.encode()))
+
     def get(self, name):
         ptr = self.api.mpv_get_property_string(self.handle, name.encode())
         if not ptr:
@@ -75,20 +109,40 @@ class Client:
         finally:
             self.api.mpv_free(ptr)
 
+    def metadata(self):
+        node = Node()
+        result = self.api.mpv_get_property(self.handle, b"af-metadata/spectrum", 6, C.byref(node))
+        if result in (-10, -11):  # Filter chain may not have produced a frame yet.
+            return {}
+        self.check(result)
+        try:
+            if node.format != 8 or not node.value.list:
+                raise RuntimeError("spectrum property is not a node map")
+            values = node.value.list.contents
+            return {values.keys[n].decode(): values.values[n].value.string.decode()
+                    for n in range(values.num) if values.values[n].format == 1}
+        finally:
+            self.api.mpv_free_node_contents(C.byref(node))
+
     def load(self, path):
         args = (C.c_char_p * 4)(b"loadfile", str(path).encode(), b"replace", None)
         self.check(self.api.mpv_command(self.handle, args))
 
-    def wait_end(self):
+    def wait_end(self, require_spectrum=False):
         deadline = time.monotonic() + 20
+        observed = False
         while time.monotonic() < deadline:
-            event = self.api.mpv_wait_event(self.handle, 0.1).contents
+            event = self.api.mpv_wait_event(self.handle, 0.05).contents
+            if require_spectrum and not observed:
+                observed = has_spectrum(self.metadata())
             if event.id == 7:
                 # mpv_event_end_file starts with reason and error (two ints).
                 reason, error = C.cast(event.data, C.POINTER(C.c_int * 2)).contents
                 self.check(error)
                 if reason != 0:
                     raise RuntimeError(f"unexpected end-file reason: {reason}")
+                if require_spectrum and not observed:
+                    raise RuntimeError("decoded audio did not expose 24-band spectrum metadata")
                 return
         raise TimeoutError("native playback did not finish")
 
@@ -98,43 +152,90 @@ class Client:
             self.handle = None
 
 
+@contextmanager
+def local_hls(directory):
+    handler = partial(SimpleHTTPRequestHandler, directory=str(directory))
+    with ThreadingHTTPServer(("127.0.0.1", 0), handler) as server:
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}/live.m3u8"
+        finally:
+            server.shutdown()
+            worker.join()
+
+
+def validate_pcm(data):
+    if len(data) < 60000 or len(data) % 2 or not any(data):
+        raise RuntimeError(f"invalid recognition PCM output: {len(data)} bytes")
+
+
+def test_bundle(library, fixtures, expected_version):
+    client = Client(library)
+    observed_formats = []
+    version = ""
+    for name, source in [("wav", fixtures / "tone.wav"), *[(name, fixtures / spec[0]) for name, spec in FORMATS.items()]]:
+        print("Testing decode and spectrum:", name, flush=True)
+        try:
+            client.open({"ao": "null", "af": spectrum_filter()})
+            version = client.get("mpv-version")
+            if not re.search(r"(?:^|\s)v?" + re.escape(expected_version) + r"(?:$|[-\s])", version):
+                raise RuntimeError(f"wrong runtime mpv version: {version}, expected {expected_version}")
+            client.set("volume", "25")
+            if float(client.get("volume")) != 25:
+                raise RuntimeError("volume was not applied")
+            client.set("pause", "yes")
+            if client.get("pause") != "yes":
+                raise RuntimeError("pause was not applied")
+            client.set("pause", "no")
+            client.load(source)
+            client.wait_end(require_spectrum=True)
+            observed_formats.append(name)
+        finally:
+            client.close()
+    with local_hls(fixtures) as source:
+        try:
+            client.open({"ao": "null", "af": spectrum_filter()})
+            client.load(source)
+            client.wait_end(require_spectrum=True)
+        finally:
+            client.close()
+    with tempfile.TemporaryDirectory() as tmp:
+        pcm = Path(tmp) / "sample.pcm"
+        try:
+            client.open({"ao": "pcm", "ao-pcm-file": str(pcm), "ao-pcm-waveheader": "no",
+                         "audio-format": "s16", "audio-samplerate": "16000", "audio-channels": "mono"})
+            client.load(fixtures / "tone.wav")
+            client.wait_end()
+        finally:
+            client.close()
+        validate_pcm(pcm.read_bytes())
+    return {"schema": 2, "mpv_version": version, "expected_mpv_version": expected_version,
+            "formats": observed_formats, "wav_decode": True, "spectrum_filter": True,
+            "spectrum_metadata": True, "pcm_sampling": True, "hls_http": True, "pause_volume": True}
+
+
+def validate_report(report, expected_version):
+    checks = ("wav_decode", "spectrum_filter", "spectrum_metadata", "pcm_sampling", "hls_http", "pause_volume")
+    if (report.get("schema") != 2 or report.get("expected_mpv_version") != expected_version
+            or not all(report.get(key) is True for key in checks)
+            or set(report.get("formats", [])) != set(REQUIRED_FORMATS)):
+        raise RuntimeError("incomplete native regression report")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", type=Path, required=True)
+    parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--lock", type=Path, default=ROOT / "native-lock.json")
     args = parser.parse_args()
     bundle = args.bundle.resolve()
     lock = read_lock(args.lock)
     library = bundle / LIBRARY_NAMES[host_platform().split("/")[0]]
-    with tempfile.TemporaryDirectory() as tmp:
-        source, pcm = Path(tmp) / "tone.wav", Path(tmp) / "sample.pcm"
-        with wave.open(str(source), "wb") as out:
-            out.setparams((2, 2, 44100, 0, "NONE", "not compressed"))
-            out.writeframes(b"".join(struct.pack("<hh", int(12000 * math.sin(2 * math.pi * 997 * n / 44100)),
-                                               int(12000 * math.sin(2 * math.pi * 1601 * n / 44100))) for n in range(88200)))
-        client = Client(library)
-        try:
-            client.open({"ao": "null", "af": spectrum_filter()})
-            version = client.get("mpv-version")
-            if not re.search(r"(?:^|\s)v?" + re.escape(lock["mpv"]["version"]) + r"(?:$|[-\s])", version):
-                raise RuntimeError(f"wrong runtime mpv version: {version}")
-            client.load(source)
-            client.wait_end()
-        finally:
-            client.close()
-        try:
-            client.open({"ao": "pcm", "ao-pcm-file": str(pcm), "ao-pcm-waveheader": "no",
-                         "audio-format": "s16", "audio-samplerate": "16000", "audio-channels": "mono"})
-            client.load(source)
-            client.wait_end()
-        finally:
-            client.close()
-        data = pcm.read_bytes()
-        if len(data) < 60000 or not any(data):
-            raise RuntimeError(f"invalid recognition PCM output: {len(data)} bytes")
-    write_json(bundle / "smoke-report.json", {"mpv_version": version, "wav_decode": True,
-               "spectrum_filter": True, "pcm_sampling": True})
-    print("Native smoke tests passed:", version)
+    report = test_bundle(library, args.fixtures.resolve(), lock["mpv"]["version"])
+    validate_report(report, lock["mpv"]["version"])
+    write_json(bundle / "smoke-report.json", report)
+    print("Native regressions passed:", report["mpv_version"])
 
 
 if __name__ == "__main__":

@@ -24,9 +24,5 @@
     "tag": "0.17.4",
     "commit": "bbb3c7f1570a4a021e52683f3fbdf74fe492ae84"
   },
-  "consumer": {
-    "repository": "tangqiu0205/tiaopin-fm",
-    "commit": "323e2e0d0585833794e755a79e96a3f33684573c"
-  },
   "macos_minimum": "15.0"
 }

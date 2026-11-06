@@ -16,6 +16,14 @@ from common import ROOT, read_lock, write_json
 import package
 import resolve_release
 import smoke
+import fixtures
+
+
+def passing_report(version="0.42.0"):
+    return {"schema": 2, "mpv_version": "mpv v" + version, "expected_mpv_version": version,
+            "formats": list(fixtures.REQUIRED_FORMATS), "wav_decode": True,
+            "spectrum_filter": True, "spectrum_metadata": True, "pcm_sampling": True,
+            "hls_http": True, "pause_volume": True}
 
 
 class BuildProfileTests(unittest.TestCase):
@@ -75,6 +83,50 @@ class BuildProfileTests(unittest.TestCase):
         self.assertIn("[b23]join=inputs=25", graph)
         self.assertNotIn("],join", graph)
         self.assertIn("astats=metadata=1", graph)
+
+
+class StandaloneRegressionTests(unittest.TestCase):
+    def test_pipeline_does_not_require_private_consumer(self):
+        lock = read_lock(ROOT / "native-lock.json")
+        self.assertNotIn("consumer", lock)
+        workflow = (ROOT / ".github/workflows/native-release.yml").read_text(encoding="utf-8")
+        self.assertNotIn("consumer_repository", workflow)
+        self.assertNotIn("path: consumer", workflow)
+        self.assertIn("scripts/fixtures.py", workflow)
+
+    def test_synthetic_fixture_generator_covers_every_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "fixtures"
+            with patch.object(fixtures, "checked") as checked, patch.object(fixtures, "run", return_value="ffmpeg version test"):
+                fixtures.generate(output)
+            self.assertEqual(checked.call_count, len(fixtures.FORMATS) + 1)
+            self.assertTrue((output / "tone.wav").exists())
+            for call in checked.call_args_list:
+                self.assertEqual(call.args[0], "ffmpeg")
+                self.assertIn("-vn", call.args)
+            self.assertIn("-hls_segment_filename", checked.call_args_list[-1].args)
+
+    def test_spectrum_requires_real_values_for_all_24_bands(self):
+        metadata = {f"lavfi.astats.{channel}.RMS_level": "-20" for channel in range(3, 27)}
+        self.assertTrue(smoke.has_spectrum(metadata))
+        del metadata["lavfi.astats.26.RMS_level"]
+        self.assertFalse(smoke.has_spectrum(metadata))
+        metadata["lavfi.astats.26.RMS_level"] = "NaN"
+        with self.assertRaisesRegex(RuntimeError, "invalid spectrum"):
+            smoke.has_spectrum(metadata)
+
+    def test_silent_or_truncated_pcm_fails(self):
+        for data in (b"", b"\0" * 64000, b"\1" * 100, b"\1" * 64001):
+            with self.assertRaisesRegex(RuntimeError, "invalid recognition PCM"):
+                smoke.validate_pcm(data)
+        smoke.validate_pcm(b"\1\0" * 32000)
+
+    def test_publication_requires_hls_every_codec_and_matching_version(self):
+        smoke.validate_report(passing_report(), "0.42.0")
+        for change in ({"hls_http": False}, {"formats": ["wav"]}, {"spectrum_metadata": False},
+                       {"expected_mpv_version": "0.38.0"}, {"schema": 1}):
+            with self.assertRaisesRegex(RuntimeError, "incomplete native regression"):
+                smoke.validate_report(passing_report() | change, "0.42.0")
 
 
 class DependencyTests(unittest.TestCase):
@@ -166,7 +218,7 @@ class PackageTests(unittest.TestCase):
                 with zipfile.ZipFile(root / f"mpv-audio-{platform}.zip", "w") as archive:
                     archive.writestr("mpv/manifest.json", json.dumps({"platform": platform.replace("-", "/", 1)}))
                     archive.writestr("mpv/native-lock.json", json.dumps(lock))
-                    archive.writestr("mpv/smoke-report.json", json.dumps({"wav_decode": True, "spectrum_filter": True, "pcm_sampling": True}))
+                    archive.writestr("mpv/smoke-report.json", json.dumps(passing_report()))
                 (root / f"sources-{platform}.tar.gz").write_bytes(b"source")
             package.release_manifest(root, root / "native-lock.json")
             metadata = json.loads((root / "release.json").read_text(encoding="utf-8"))

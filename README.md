@@ -8,7 +8,7 @@
 - 将上游稳定版 tag 解析为不可变的源码 commit，生成本次构建的 `native-lock.json`。
 - 对 Linux、macOS、Windows 的 amd64 / arm64 共六个平台分别原生构建。
 - 检查 FFmpeg 没有启用视频解码器；运行动态库版本、WAV 解码、频谱滤镜和 PCM 采样冒烟测试。
-- 使用固定 commit 的 [TiaopinFM](https://github.com/tangqiu0205/tiaopin-fm) 回归套件验证 MP3 / AAC / FLAC / Vorbis / Opus、HLS、真实频谱元数据和识曲采样。
+- 在本仓库使用合成音频独立验证 MP3 / AAC / FLAC / Vorbis / Opus、通过本地 HTTP 提供的 HLS、24 段真实频谱元数据、暂停 / 音量及 PCM 采样；不依赖私有消费者仓库或跨仓库访问令牌。
 - **六个平台全部通过后才发布** `libmpv-audio-<mpv版本>-r<修订号>`。失败保留 Actions 日志，不发布也不覆盖旧版本。
 - 相同版本的构建配置调整使用新的修订号，例如 `r2`。流水线禁止覆盖已有 tag / Release，不使用 `--clobber`。
 
@@ -46,7 +46,7 @@ TLS 使用 Windows Schannel、macOS Secure Transport 或 Linux GnuTLS。
 
 - `mpv-audio-<os>-<arch>.zip`：包含 `mpv/` 下主库、全部非系统动态依赖、许可证、构建配置和冒烟报告。
 - `sources-<os>-<arch>.tar.gz`：本次四个主要组件的完整源码快照，包含固定的 Git 子模块；不包含辅助发行版库的源码。
-- `native-lock.json`：本次源码 commit 和测试消费者 commit。
+- `native-lock.json`：本次四个主要组件的源码 commit。
 - `release.json`：六个平台运行包的 SHA-256。
 - `SHA256SUMS`：所有发布资产的 SHA-256。
 
@@ -67,13 +67,14 @@ python -m unittest discover -s tests -v
 python -m compileall -q scripts tests
 ```
 
-原生构建还需要 C/C++ 编译器、Git、make、pkg-config、Ninja 和各平台字体 / 音频 / TLS 开发库；具体安装列表见 `.github/workflows/native-release.yml`。
+原生构建还需要 C/C++ 编译器、Git、make、pkg-config、Ninja 和各平台字体 / 音频 / TLS 开发库；具体安装列表见 `.github/workflows/native-release.yml`。发行版 FFmpeg 可执行程序仅用于生成合成测试样本，不进入发布包，也不替代从锁定源码构建的音频版 FFmpeg 库。
 
 ```bash
 python -m pip install -r requirements.txt
 python scripts/build_native.py --platform linux/amd64 --lock native-lock.json
-python scripts/smoke.py --bundle build/linux-amd64/bundle/mpv --lock native-lock.json
-# 按 CI 执行 FM 消费者回归测试，通过后再打包：
+python scripts/fixtures.py --output build/fixtures
+python scripts/smoke.py --bundle build/linux-amd64/bundle/mpv --fixtures build/fixtures --lock native-lock.json
+# 独立原生回归全部通过后再打包：
 python scripts/package.py --platform linux/amd64
 ```
 

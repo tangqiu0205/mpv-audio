@@ -78,9 +78,7 @@ def main():
         output = ROOT / "build"
         output.mkdir(exist_ok=True)
         write_json(output / "native-lock.json", lock)
-        outputs = {"build": "true", "tag": lock["release"]["tag"],
-                   "consumer": lock["consumer"]["commit"],
-                   "consumer_repository": lock["consumer"]["repository"]}
+        outputs = {"build": "true", "tag": lock["release"]["tag"]}
         print(json.dumps(lock, indent=2))
     else:
         print("Latest requested release is already published; nothing to do.")

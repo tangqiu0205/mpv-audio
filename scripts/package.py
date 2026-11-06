@@ -6,6 +6,7 @@ from pathlib import Path
 import zipfile
 
 from common import ROOT, read_lock, sha256, write_json
+from smoke import validate_report
 
 PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64", "windows-arm64")
 
@@ -13,8 +14,9 @@ PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "wind
 def package(target):
     platform = target.replace("/", "-")
     bundle = ROOT / "build" / platform / "bundle" / "mpv"
-    if not (bundle / "smoke-report.json").exists():
-        raise RuntimeError("native smoke test report is missing")
+    report = json.loads((bundle / "smoke-report.json").read_text(encoding="utf-8"))
+    lock = read_lock(bundle / "native-lock.json")
+    validate_report(report, lock["mpv"]["version"])
     manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
     if manifest["platform"] != target:
         raise RuntimeError("bundle platform mismatch")
@@ -41,8 +43,7 @@ def release_manifest(directory, lock_path):
             smoke = json.loads(stream.read("mpv/smoke-report.json"))
         if manifest["platform"].replace("/", "-") != platform or plan != lock:
             raise RuntimeError(f"inconsistent build plan in {platform}")
-        if not all(smoke.get(key) is True for key in ("wav_decode", "spectrum_filter", "pcm_sampling")):
-            raise RuntimeError(f"incomplete smoke tests in {platform}")
+        validate_report(smoke, lock["mpv"]["version"])
         assets[platform] = {"asset": archive.name, "sha256": sha256(archive)}
     write_json(directory / "release.json", {"schema": 1, "tag": lock["release"]["tag"],
                "mpv_version": lock["mpv"]["version"], "profile": "audio", "assets": assets})
