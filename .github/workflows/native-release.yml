@@ -1,0 +1,210 @@
+name: Native audio release
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'mpv stable version, e.g. 0.42.0 (empty = latest upstream stable)'
+        type: string
+        default: ''
+      revision:
+        description: 'Build revision; use a new number rather than overwriting a release'
+        type: string
+        default: '1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-audio-release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      tag: ${{ steps.plan.outputs.tag }}
+      consumer: ${{ steps.plan.outputs.consumer }}
+      consumer_repository: ${{ steps.plan.outputs.consumer_repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - run: python -m unittest discover -s tests -v
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REVISION: ${{ inputs.revision || '1' }}
+        run: python scripts/resolve_release.py --repository "$GITHUB_REPOSITORY" --version "$REQUESTED_VERSION" --revision "$REVISION"
+      - uses: actions/upload-artifact@v4
+        if: steps.plan.outputs.build == 'true'
+        with:
+          name: build-plan
+          path: build/native-lock.json
+          if-no-files-found: error
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, platform: linux/amd64, name: linux-amd64 }
+          - { os: ubuntu-24.04-arm, platform: linux/arm64, name: linux-arm64 }
+          - { os: macos-15-intel, platform: darwin/amd64, name: darwin-amd64 }
+          - { os: macos-15, platform: darwin/arm64, name: darwin-arm64 }
+          - { os: windows-2025, platform: windows/amd64, name: windows-amd64, msystem: UCRT64 }
+          - { os: windows-11-arm, platform: windows/arm64, name: windows-arm64, msystem: CLANGARM64 }
+    steps:
+      - name: Keep POSIX build scripts LF-terminated
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf input
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-plan
+          path: build-plan
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.plan.outputs.consumer_repository }}
+          ref: ${{ needs.plan.outputs.consumer }}
+          path: consumer
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: consumer/go.mod
+      - uses: actions/setup-python@v6
+        if: runner.os != 'Windows'
+        with:
+          python-version: '3.13'
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git pkg-config ninja-build patchelf \
+            libfreetype-dev libfribidi-dev libharfbuzz-dev libgnutls28-dev libasound2-dev libpulse-dev
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install freetype fribidi harfbuzz pkgconf ninja
+      - uses: msys2/setup-msys2@v2
+        if: runner.os == 'Windows'
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: git make diffutils
+          pacboy: toolchain:p python:p python-pip:p ninja:p pkgconf:p freetype:p fribidi:p harfbuzz:p
+      - name: Build Unix audio libraries
+        if: runner.os != 'Windows'
+        env:
+          TARGET: ${{ matrix.platform }}
+        run: |
+          python -m pip install -r requirements.txt
+          python scripts/build_native.py --platform "$TARGET" --lock build-plan/native-lock.json
+      - name: Build Windows audio libraries
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        env:
+          TARGET: ${{ matrix.platform }}
+        run: |
+          python -m pip install --break-system-packages -r requirements.txt
+          python scripts/build_native.py --platform "$TARGET" --lock build-plan/native-lock.json
+      - name: Relocated Unix bundle smoke tests
+        if: runner.os != 'Windows'
+        env:
+          NAME: ${{ matrix.name }}
+        run: |
+          # Do not let build-prefix search paths hide missing bundled dependencies.
+          unset LD_LIBRARY_PATH DYLD_LIBRARY_PATH
+          python scripts/smoke.py --bundle "build/$NAME/bundle/mpv" --lock build-plan/native-lock.json
+      - name: Relocated Windows bundle smoke tests
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        env:
+          NAME: ${{ matrix.name }}
+        run: python scripts/smoke.py --bundle "build/$NAME/bundle/mpv" --lock build-plan/native-lock.json
+      - name: FM native format, HLS, spectrum and recognition regressions
+        shell: bash
+        env:
+          TARGET: ${{ matrix.platform }}
+          NAME: ${{ matrix.name }}
+        run: |
+          case "$TARGET" in
+            windows/*) lib=mpv-2.dll ;;
+            darwin/*) lib=libmpv.dylib ;;
+            linux/*) lib=libmpv.so.2 ;;
+          esac
+          export TIAOPIN_TEST_MPV=1
+          export TIAOPIN_MPV_LIBRARY="$GITHUB_WORKSPACE/build/$NAME/bundle/mpv/$lib"
+          cd consumer
+          go test ./internal/... -count=1 -timeout=5m
+      - name: Package Unix artifacts
+        if: runner.os != 'Windows'
+        env:
+          TARGET: ${{ matrix.platform }}
+        run: python scripts/package.py --platform "$TARGET"
+      - name: Package Windows artifacts
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        env:
+          TARGET: ${{ matrix.platform }}
+        run: python scripts/package.py --platform "$TARGET"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain build diagnostics after failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ matrix.name }}
+          path: |
+            build/**/meson-logs/meson-log.txt
+            build/**/ffbuild/config.log
+            build/**/config_components.h
+          if-no-files-found: ignore
+
+  publish:
+    needs: [plan, build]
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-plan
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: release
+          merge-multiple: true
+      - name: Validate every platform and checksum every asset
+        run: python scripts/package.py --release-dir release --lock release/native-lock.json
+      - name: Publish only after every platform passes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          printf '%s\n' \
+            "Audio-focused libmpv. All six platforms passed native smoke and FM regression tests." \
+            "" \
+            "See native-lock.json, release.json, SHA256SUMS, per-platform sources and bundled licenses." \
+            "Supporting distribution libraries are recorded in each bundle manifest; see README for compatibility and licensing limits." > release-notes.md
+          # No --clobber and no force-tag updates: existing versions are never replaced.
+          gh release create "$TAG" release/* --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "$TAG" --notes-file release-notes.md --draft
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false

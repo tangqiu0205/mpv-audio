@@ -1,0 +1,2 @@
+meson==1.9.1
+pefile==2024.8.26; sys_platform == 'win32'

@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "mpv": {
+    "version": "0.42.0",
+    "repository": "https://github.com/mpv-player/mpv.git",
+    "tag": "v0.42.0",
+    "commit": "b0841e8c4d156b8403dc1876c4cbd9011eb583f3"
+  },
+  "ffmpeg": {
+    "version": "8.0.1",
+    "repository": "https://github.com/FFmpeg/FFmpeg.git",
+    "tag": "n8.0.1",
+    "commit": "894da5ca7d742e4429ffb2af534fcda0103ef593"
+  },
+  "libplacebo": {
+    "version": "7.387.0",
+    "repository": "https://github.com/haasn/libplacebo.git",
+    "tag": "v7.387.0",
+    "commit": "275f7dea27924cdd34ab2e6c20e448b6bc4fab65"
+  },
+  "libass": {
+    "version": "0.17.4",
+    "repository": "https://github.com/libass/libass.git",
+    "tag": "0.17.4",
+    "commit": "bbb3c7f1570a4a021e52683f3fbdf74fe492ae84"
+  },
+  "consumer": {
+    "repository": "tangqiu0205/tiaopin-fm",
+    "commit": "323e2e0d0585833794e755a79e96a3f33684573c"
+  },
+  "macos_minimum": "15.0"
+}
